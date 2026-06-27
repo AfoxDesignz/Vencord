@@ -45,7 +45,7 @@ const StreakBadge = ({ userId }: { userId: string; }) => {
 
     if (!streak || streak.count < 1) return null;
 
-    const today = moment().format("YYYY-MM-DD");
+    const today = moment().utc().format("YYYY-MM-DD");
     const active = streak.last_streak_date === today;
 
     const FireIcon = iconsModule?.FireIcon;
@@ -92,7 +92,7 @@ export default definePlugin({
             const me = UserStore.getCurrentUser()?.id;
             if (!useAuthorizationStore.getState().isAuthorized()) return;
 
-            const today = moment().format("YYYY-MM-DD");
+            const today = moment().utc().format("YYYY-MM-DD");
             const cached = useStreaksStore.getState().streaks[recipientId];
             const myFlag = cached && cached.today_date != null && cached.today_date === today && (cached.user_a_id === me ? cached.user_a_today : cached.user_b_today);
             const theirFlag = cached && cached.today_date != null && cached.today_date === today && (cached.user_a_id === me ? cached.user_b_today : cached.user_a_today);
