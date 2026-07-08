@@ -16,12 +16,17 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+import { isPluginEnabled } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
 import { getUserSettingLazy } from "@api/UserSettings";
+import { Button } from "@components/Button";
 import { Divider } from "@components/Divider";
 import { ErrorCard } from "@components/ErrorCard";
 import { Flex } from "@components/Flex";
+import { Heading } from "@components/Heading";
 import { Link } from "@components/Link";
+import { Paragraph } from "@components/Paragraph";
+import { debounce } from "@shared/debounce";
 import { Devs } from "@utils/constants";
 import { isTruthy } from "@utils/guards";
 import { Margins } from "@utils/margins";
@@ -31,9 +36,11 @@ import definePlugin, { OptionType } from "@utils/types";
 import { Activity } from "@vencord/discord-types";
 import { ActivityType } from "@vencord/discord-types/enums";
 import { findByCodeLazy, findComponentByCodeLazy } from "@webpack";
-import { ApplicationAssetUtils, Button, FluxDispatcher, Forms, React, UserStore } from "@webpack/common";
+import { ApplicationAssetUtils, FluxDispatcher, UserStore } from "@webpack/common";
 
 import { RPCSettings } from "./RpcSettings";
+
+export const MAX_PRESETS = 3;
 
 const useProfileThemeStyle = findByCodeLazy("profileThemeStyle:", "--profile-gradient-primary-color");
 const ActivityView = findComponentByCodeLazy(".party?(0", "USER_PROFILE_ACTIVITY");
@@ -41,7 +48,7 @@ const ActivityView = findComponentByCodeLazy(".party?(0", "USER_PROFILE_ACTIVITY
 const ShowCurrentGame = getUserSettingLazy<boolean>("status", "showCurrentGame")!;
 
 async function getApplicationAsset(key: string): Promise<string> {
-    return (await ApplicationAssetUtils.fetchAssetIds(settings.store.appID!, [key]))[0];
+    return (await ApplicationAssetUtils.fetchAssetIds(getActivePreset().appID!, [key]))[0];
 }
 
 export const enum TimestampMode {
@@ -51,12 +58,7 @@ export const enum TimestampMode {
     CUSTOM,
 }
 
-export const settings = definePluginSettings({
-    config: {
-        type: OptionType.COMPONENT,
-        component: RPCSettings
-    },
-}).withPrivateSettings<{
+export interface RpcPreset {
     appID?: string;
     appName?: string;
     details?: string;
@@ -80,9 +82,96 @@ export const settings = definePluginSettings({
     buttonTwoURL?: string;
     partySize?: number;
     partyMaxSize?: number;
+}
+
+export const settings = definePluginSettings({
+    config: {
+        type: OptionType.COMPONENT,
+        component: RPCSettings
+    },
+}).withPrivateSettings<RpcPreset & {
+    activePreset?: number;
+    presets?: RpcPreset[];
 }>();
 
+export function ensurePresets() {
+    const s = settings.store;
+    if (!Array.isArray(s.presets)) {
+        s.presets = [
+            {
+                appID: s.appID,
+                appName: s.appName,
+                details: s.details,
+                detailsURL: s.detailsURL,
+                state: s.state,
+                stateURL: s.stateURL,
+                type: s.type,
+                streamLink: s.streamLink,
+                timestampMode: s.timestampMode,
+                startTime: s.startTime,
+                endTime: s.endTime,
+                imageBig: s.imageBig,
+                imageBigURL: s.imageBigURL,
+                imageBigTooltip: s.imageBigTooltip,
+                imageSmall: s.imageSmall,
+                imageSmallURL: s.imageSmallURL,
+                imageSmallTooltip: s.imageSmallTooltip,
+                buttonOneText: s.buttonOneText,
+                buttonOneURL: s.buttonOneURL,
+                buttonTwoText: s.buttonTwoText,
+                buttonTwoURL: s.buttonTwoURL,
+                partySize: s.partySize,
+                partyMaxSize: s.partyMaxSize,
+            },
+            {},
+            {}
+        ];
+
+        const legacyKeys: (keyof RpcPreset)[] = ["appID", "appName", "details", "detailsURL", "state", "stateURL", "type", "streamLink", "timestampMode", "startTime", "endTime", "imageBig", "imageBigURL", "imageBigTooltip", "imageSmall", "imageSmallURL", "imageSmallTooltip", "buttonOneText", "buttonOneURL", "buttonTwoText", "buttonTwoURL", "partySize", "partyMaxSize"];
+        for (const key of legacyKeys) delete s[key];
+    }
+
+    while (s.presets.length < MAX_PRESETS) {
+        s.presets.push({});
+    }
+
+    if (typeof s.activePreset !== "number" || s.activePreset < 0 || s.activePreset >= MAX_PRESETS) {
+        s.activePreset = 0;
+    }
+}
+
+export function getActivePreset(): RpcPreset {
+    const s = settings.store;
+    if (Array.isArray(s.presets)) {
+        return s.presets[s.activePreset ?? 0] ?? {};
+    }
+    return s;
+}
+
+export const refreshRpc = debounce(() => {
+    setRpc(true);
+    if (isPluginEnabled("CustomRPC")) {
+        startTimestampLoop();
+        setRpc();
+    }
+}, 500);
+
+export function switchPreset(index: number) {
+    const s = settings.store;
+    if (!Array.isArray(s.presets)) ensurePresets();
+    s.activePreset = index >= 0 && index < MAX_PRESETS ? index : 0;
+    refreshRpc();
+}
+
+export function updatePresetValue<K extends keyof RpcPreset>(key: K, value: RpcPreset[K]) {
+    const s = settings.store;
+    if (!Array.isArray(s.presets)) ensurePresets();
+    s.presets![s.activePreset ?? 0][key] = value;
+    refreshRpc();
+}
+
 async function createActivity(): Promise<Activity | undefined> {
+    const preset = getActivePreset();
     const {
         appID,
         appName,
@@ -107,7 +196,7 @@ async function createActivity(): Promise<Activity | undefined> {
         partyMaxSize,
         partySize,
         timestampMode
-    } = settings.store;
+    } = preset;
 
     if (!appName) return;
 
@@ -130,14 +219,20 @@ async function createActivity(): Promise<Activity | undefined> {
             break;
         case TimestampMode.TIME:
             activity.timestamps = {
-                start: Date.now() - (new Date().getHours() * 3600 + new Date().getMinutes() * 60 + new Date().getSeconds()) * 1000
+                start: Date.now() - (new Date().setHours(0, 0, 0, 0))
             };
             break;
         case TimestampMode.CUSTOM:
             if (startTime || endTime) {
                 activity.timestamps = {};
-                if (startTime) activity.timestamps.start = startTime;
-                if (endTime) activity.timestamps.end = endTime;
+                if (startTime && endTime && endTime > startTime) {
+                    const anchor = getLoopAnchor();
+                    activity.timestamps.start = anchor;
+                    activity.timestamps.end = anchor + (endTime - startTime);
+                } else {
+                    if (startTime) activity.timestamps.start = startTime;
+                    if (endTime) activity.timestamps.end = endTime;
+                }
             }
             break;
         case TimestampMode.NONE:
@@ -168,20 +263,26 @@ async function createActivity(): Promise<Activity | undefined> {
     }
 
     if (imageBig) {
-        activity.assets = {
-            large_image: await getApplicationAsset(imageBig),
-            large_text: imageBigTooltip || undefined,
-            large_url: imageBigURL || undefined
-        };
+        const asset = await getApplicationAsset(imageBig);
+        if (asset) {
+            activity.assets = {
+                large_image: asset,
+                large_text: imageBigTooltip || undefined,
+                large_url: imageBigURL || undefined
+            };
+        }
     }
 
     if (imageSmall) {
-        activity.assets = {
-            ...activity.assets,
-            small_image: await getApplicationAsset(imageSmall),
-            small_text: imageSmallTooltip || undefined,
-            small_url: imageSmallURL || undefined
-        };
+        const asset = await getApplicationAsset(imageSmall);
+        if (asset) {
+            activity.assets = {
+                ...activity.assets,
+                small_image: asset,
+                small_text: imageSmallTooltip || undefined,
+                small_url: imageSmallURL || undefined
+            };
+        }
     }
 
     if (partyMaxSize && partySize) {
@@ -193,7 +294,7 @@ async function createActivity(): Promise<Activity | undefined> {
     for (const k in activity) {
         if (k === "type") continue;
         const v = activity[k];
-        if (!v || v.length === 0)
+        if (!v || (Array.isArray(v) && v.length === 0))
             delete activity[k];
     }
 
@@ -210,18 +311,59 @@ export async function setRpc(disable?: boolean) {
     });
 }
 
+let loopInterval: ReturnType<typeof setInterval> | undefined;
+let loopAnchor = 0;
+
+function getLoopAnchor() {
+    return loopAnchor;
+}
+
+export function startTimestampLoop() {
+    stopTimestampLoop();
+
+    const { timestampMode, startTime, endTime } = getActivePreset();
+    if (timestampMode !== TimestampMode.CUSTOM || !startTime || !endTime) return;
+    const duration = endTime - startTime;
+    if (duration <= 0) return;
+
+    loopAnchor = Date.now();
+
+    loopInterval = setInterval(() => {
+
+        if (Date.now() >= loopAnchor + duration) {
+            loopAnchor = Date.now();
+            setRpc();
+        }
+    }, 1000);
+}
+
+function stopTimestampLoop() {
+    if (loopInterval !== undefined) {
+        clearInterval(loopInterval);
+        loopInterval = undefined;
+    }
+    loopAnchor = 0;
+}
+
 export default definePlugin({
     name: "CustomRPC",
     description: "Add a fully customisable Rich Presence (Game status) to your Discord profile",
     tags: ["Activity", "Customisation"],
-    authors: [Devs.captain, Devs.AutumnVN, Devs.nin0dev],
+    authors: [Devs.captain, Devs.AutumnVN, Devs.nin0dev, Devs.lucabeyer],
     dependencies: ["UserSettingsAPI"],
     // This plugin's patch is not important for functionality, so don't require a restart
     requiresRestart: false,
     settings,
 
-    start: setRpc,
-    stop: () => setRpc(true),
+    start() {
+        ensurePresets();
+        startTimestampLoop();
+        setRpc();
+    },
+    stop() {
+        setRpc(true);
+        stopTimestampLoop();
+    },
 
     // Discord hides buttons on your own Rich Presence for some reason. This patch disables that behaviour
     patches: [
@@ -230,12 +372,14 @@ export default definePlugin({
             replacement: {
                 match: /.getId\(\)===\i.id/,
                 replace: "$& && false"
-            }
+            },
         }
     ],
 
     settingsAboutComponent: () => {
-        const [activity] = useAwaiter(createActivity, { fallbackValue: undefined, deps: Object.values(settings.store) });
+        settings.use();
+        const preset = getActivePreset();
+        const [activity] = useAwaiter(createActivity, { fallbackValue: undefined, deps: [settings.store.activePreset, ...Object.values(preset)] });
         const gameActivityEnabled = ShowCurrentGame.useSetting();
         const { profileThemeStyle } = useProfileThemeStyle({});
 
@@ -246,11 +390,11 @@ export default definePlugin({
                         className={classes(Margins.top16, Margins.bottom16)}
                         style={{ padding: "1em" }}
                     >
-                        <Forms.FormTitle>Notice</Forms.FormTitle>
-                        <Forms.FormText>Activity Sharing isn't enabled, people won't be able to see your custom rich presence!</Forms.FormText>
+                        <Heading>Notice</Heading>
+                        <Paragraph>Activity Sharing isn't enabled, people won't be able to see your custom rich presence!</Paragraph>
 
                         <Button
-                            color={Button.Colors.TRANSPARENT}
+                            variant="secondary"
                             className={Margins.top8}
                             onClick={() => ShowCurrentGame.updateSetting(true)}
                         >
@@ -260,22 +404,22 @@ export default definePlugin({
                 )}
 
                 <Flex flexDirection="column" gap=".5em" className={Margins.top16}>
-                    <Forms.FormText>
+                    <Paragraph>
                         Go to the <Link href="https://discord.com/developers/applications">Discord Developer Portal</Link> to create an application and
                         get the application ID.
-                    </Forms.FormText>
-                    <Forms.FormText>
+                    </Paragraph>
+                    <Paragraph>
                         Upload images in the Rich Presence tab to get the image keys.
-                    </Forms.FormText>
-                    <Forms.FormText>
+                    </Paragraph>
+                    <Paragraph>
                         If you want to use an image link, download your image and reupload the image to <Link href="https://imgur.com">Imgur</Link> and get the image link by right-clicking the image and selecting "Copy image address".
-                    </Forms.FormText>
-                    <Forms.FormText>
+                    </Paragraph>
+                    <Paragraph>
                         You can't see your own buttons on your profile, but everyone else can see it fine.
-                    </Forms.FormText>
-                    <Forms.FormText>
+                    </Paragraph>
+                    <Paragraph>
                         Some weird unicode text ("fonts" 𝖑𝖎𝖐𝖊 𝖙𝖍𝖎𝖘) may cause the rich presence to not show up, try using normal letters instead.
-                    </Forms.FormText>
+                    </Paragraph>
                 </Flex>
 
                 <Divider className={Margins.top8} />

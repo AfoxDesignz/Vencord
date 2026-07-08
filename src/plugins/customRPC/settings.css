@@ -25,7 +25,3 @@
     opacity: 0.5;
     cursor: not-allowed;
 }
-
-.vc-customRPC-settings-error {
-    color: var(--text-feedback-critical);
-}
